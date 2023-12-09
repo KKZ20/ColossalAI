@@ -958,6 +958,7 @@ class HybridParallelPlugin(PipelinePluginBase):
         pp_style: str = "1f1b",
         num_model_chunks: int = 1,
         enable_metadata_cache: bool = True,
+        test_seq_parallelism: bool = False,
     ) -> None:
         super().__init__()
         assert (
@@ -1030,6 +1031,7 @@ class HybridParallelPlugin(PipelinePluginBase):
             enable_jit_fused=self.enable_jit_fused,
             enable_sequence_parallelism=enable_sequence_parallelism,
             enable_sequence_overlap=enable_sequence_overlap,
+            test_seq_parallelism=test_seq_parallelism,
         )
         self.amp_config = dict(
             initial_scale=initial_scale,
