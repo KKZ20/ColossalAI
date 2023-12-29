@@ -9,7 +9,7 @@ from torch.nn import Module
 
 from colossalai.shardformer.layer import FusedRMSNorm, Linear1D_Col, Linear1D_Row, RMSNorm, VocabParallelEmbedding1D
 
-from ..modeling.llama import LlamaPipelineForwards, get_llama_flash_attention_forward, test_llama_seq_parallel_attention
+from ..modeling.llama import LlamaPipelineForwards, get_llama_flash_attention_forward, test_llama_seq_parallel_attention, test_llama_sequence_parallel_forward_fn
 from .base_policy import ModulePolicyDescription, Policy, SubModuleReplacementDescription
 
 __all__ = ["LlamaPolicy", "LlamaForCausalLMPolicy", "LlamaForSequenceClassificationPolicy"]
@@ -45,31 +45,38 @@ class LlamaPolicy(Policy):
             self.shard_config.enable_sequence_parallelism = False
             warnings.warn("Llama dosen't support sequence parallelism now, will ignore the sequence parallelism flag.")
 
+        # TODO: should we let users choose which sp method to use?
+        test_seq_parallelism_method = "fused_megatron" # or "ulysses"
+
         # todo: seq
         if self.shard_config.test_seq_parallelism:
-            sequence_parallelism_size = dist.get_world_size()
-            decoder_attribute_replacement = {
-                "num_heads": self.model.config.num_attention_heads // sequence_parallelism_size,
-                "head_dim": self.model.config.hidden_size // self.model.config.num_attention_heads,
-            }
-            if getattr(self.model.config, "num_key_value_heads", False):
-                decoder_attribute_replacement["num_key_value_heads"] = (
-                    self.model.config.num_key_value_heads // sequence_parallelism_size
+            if test_seq_parallelism_method == "ulysses":
+                sequence_parallelism_size = dist.get_world_size()
+                decoder_attribute_replacement = {
+                    "num_heads": self.model.config.num_attention_heads // sequence_parallelism_size,
+                    "head_dim": self.model.config.hidden_size // self.model.config.num_attention_heads,
+                }
+                if getattr(self.model.config, "num_key_value_heads", False):
+                    decoder_attribute_replacement["num_key_value_heads"] = (
+                        self.model.config.num_key_value_heads // sequence_parallelism_size
+                    )
+                    decoder_attribute_replacement["num_key_value_groups"] = (
+                        self.model.config.hidden_size // self.model.config.num_attention_heads
+                    )
+                policy[LlamaAttention] = ModulePolicyDescription(
+                    attribute_replacement=decoder_attribute_replacement,
                 )
-                decoder_attribute_replacement["num_key_value_groups"] = (
-                    self.model.config.hidden_size // self.model.config.num_attention_heads
-                )
-            policy[LlamaAttention] = ModulePolicyDescription(
-                attribute_replacement=decoder_attribute_replacement,
-            )
 
-            self.append_or_create_method_replacement(
-                description={
-                    "forward": test_llama_seq_parallel_attention(),
-                },
-                policy=policy,
-                target_key=LlamaAttention,
-            )
+                self.append_or_create_method_replacement(
+                    description={
+                        "forward": test_llama_seq_parallel_attention(),
+                    },
+                    policy=policy,
+                    target_key=LlamaAttention,
+                )
+
+        enable_seq_parallel_fused_megatron = self.shard_config.test_seq_parallelism and test_seq_parallelism_method == "fused_megatron"
+
 
         if self.shard_config.enable_tensor_parallelism:
             decoder_attribute_replacement = {
@@ -87,30 +94,37 @@ class LlamaPolicy(Policy):
                     SubModuleReplacementDescription(
                         suffix="self_attn.q_proj",
                         target_module=Linear1D_Col,
+                        kwargs=dict(seq_parallel=enable_seq_parallel_fused_megatron),
                     ),
                     SubModuleReplacementDescription(
                         suffix="self_attn.k_proj",
                         target_module=Linear1D_Col,
+                        kwargs=dict(seq_parallel=enable_seq_parallel_fused_megatron),
                     ),
                     SubModuleReplacementDescription(
                         suffix="self_attn.v_proj",
                         target_module=Linear1D_Col,
+                        kwargs=dict(seq_parallel=enable_seq_parallel_fused_megatron),
                     ),
                     SubModuleReplacementDescription(
                         suffix="self_attn.o_proj",
                         target_module=Linear1D_Row,
+                        kwargs=dict(seq_parallel=enable_seq_parallel_fused_megatron),
                     ),
                     SubModuleReplacementDescription(
                         suffix="mlp.gate_proj",
                         target_module=Linear1D_Col,
+                        kwargs=dict(seq_parallel=enable_seq_parallel_fused_megatron),
                     ),
                     SubModuleReplacementDescription(
                         suffix="mlp.up_proj",
                         target_module=Linear1D_Col,
+                        kwargs=dict(seq_parallel=enable_seq_parallel_fused_megatron),
                     ),
                     SubModuleReplacementDescription(
                         suffix="mlp.down_proj",
                         target_module=Linear1D_Row,
+                        kwargs=dict(seq_parallel=enable_seq_parallel_fused_megatron),
                     ),
                 ],
             )
@@ -153,12 +167,15 @@ class LlamaPolicy(Policy):
         if self.shard_config.enable_flash_attention:
             self.append_or_create_method_replacement(
                 description={
-                    "forward": get_llama_flash_attention_forward(),
+                    "forward": get_llama_flash_attention_forward(self.shard_config),
                 },
                 policy=policy,
                 target_key=LlamaAttention,
             )
 
+        if enable_seq_parallel_fused_megatron:
+            policy[LlamaModel].method_replacement = {"forward": test_llama_sequence_parallel_forward_fn(self.shard_config)}
+            
         return policy
 
     def postprocess(self):

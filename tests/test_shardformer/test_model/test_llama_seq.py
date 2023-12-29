@@ -100,10 +100,11 @@ def check_forward_backward(model_fn, data_gen_fn, output_transform_fn, loss_fn, 
     "test_config",
     [
         {
-            "tp_size": 1,
+            "tp_size": 4,
             "pp_size": 1,
             "num_microbatches": 1,
             "test_seq_parallelism": True,
+            "enable_all_optimization": True,
             "use_lazy_init": True,
             "precision": "fp16",
             "initial_scale": 1,

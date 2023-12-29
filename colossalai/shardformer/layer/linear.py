@@ -26,6 +26,7 @@ from ._operation import (
     gather_forward_split_backward,
     linear_gather_forward_reducescatter_backward,
     linear_reducescatter_forward_gather_backward,
+    reducescatter_forward_gather_backward,
     linear_with_async_comm,
     reduce_forward,
     split_forward_gather_backward,
@@ -408,12 +409,15 @@ class Linear1D_Row(ParallelModule):
                     handle.wait()
                 output = torch.cat(output_parallel_list, dim=-1)
         else:
-            output_parallel = F.linear(input_, self.weight)
+            #output_parallel = F.linear(input_, self.weight)
             if self.seq_parallel:
-                output = linear_reducescatter_forward_gather_backward(
-                    output_parallel, self.process_group, self.seq_parallel_dim
-                )
+                # TODO how to maintain compatability?
+                #output = reducescatter_forward_gather_backward(
+                #    output_parallel, self.process_group, self.seq_parallel_dim
+                #)
+                output = linear_reducescatter_forward_gather_backward(input_, self.weight, dim=self.seq_parallel_dim, )
             else:
+                output_parallel = F.linear(input_, self.weight)
                 output = reduce_forward(output_parallel, self.process_group)
 
         if not self.skip_bias_add:
