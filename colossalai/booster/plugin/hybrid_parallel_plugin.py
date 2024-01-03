@@ -165,6 +165,14 @@ class HybridParallelModule(ModelWrapper):
             None
         """
 
+        if self.shard_config.test_seq_parallelism:
+            if grads is not None:
+                # Synchronize provided gradient tensors across the tensor parallelism group.
+                SeqParallelUtils.allreduce_partial_data_grad(tp_group=self.tp_group, grads=grads)
+            else:
+                # Synchronize gradients from the model across the tensor parallelism group.
+                SeqParallelUtils.allreduce_partial_data_grad(tp_group=self.tp_group, model=self.module)
+
         if self.tp_group.size() > 1 and self.shard_config.enable_sequence_parallelism:
             if grads is not None:
                 # Synchronize provided gradient tensors across the tensor parallelism group.

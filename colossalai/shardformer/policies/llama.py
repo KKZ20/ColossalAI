@@ -9,7 +9,12 @@ from torch.nn import Module
 
 from colossalai.shardformer.layer import FusedRMSNorm, Linear1D_Col, Linear1D_Row, RMSNorm, VocabParallelEmbedding1D
 
-from ..modeling.llama import LlamaPipelineForwards, get_llama_flash_attention_forward, test_llama_seq_parallel_attention
+from ..modeling.llama import (
+    LlamaPipelineForwards,
+    get_llama_flash_attention_forward,
+    test_llama_seq_parallel_attention,
+    test_llama_seq_parallel_model,
+)
 from .base_policy import ModulePolicyDescription, Policy, SubModuleReplacementDescription
 
 __all__ = ["LlamaPolicy", "LlamaForCausalLMPolicy", "LlamaForSequenceClassificationPolicy"]
@@ -43,7 +48,7 @@ class LlamaPolicy(Policy):
 
         if self.shard_config.enable_sequence_parallelism:
             self.shard_config.enable_sequence_parallelism = False
-            warnings.warn("Llama dosen't support sequence parallelism now, will ignore the sequence parallelism flag.")
+            warnings.warn("Llama doesn't support sequence parallelism now, will ignore the sequence parallelism flag.")
 
         # todo: seq
         if self.shard_config.test_seq_parallelism:
@@ -57,7 +62,7 @@ class LlamaPolicy(Policy):
                     self.model.config.num_key_value_heads // sequence_parallelism_size
                 )
                 decoder_attribute_replacement["num_key_value_groups"] = (
-                    self.model.config.hidden_size // self.model.config.num_attention_heads
+                    self.model.config.num_attention_heads // self.model.config.num_key_value_heads
                 )
             policy[LlamaAttention] = ModulePolicyDescription(
                 attribute_replacement=decoder_attribute_replacement,
@@ -69,6 +74,13 @@ class LlamaPolicy(Policy):
                 },
                 policy=policy,
                 target_key=LlamaAttention,
+            )
+            self.append_or_create_method_replacement(
+                description={
+                    "forward": test_llama_seq_parallel_model(),
+                },
+                policy=policy,
+                target_key=LlamaModel,
             )
 
         if self.shard_config.enable_tensor_parallelism:
