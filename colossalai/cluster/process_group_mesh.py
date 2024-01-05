@@ -45,7 +45,7 @@ class ProcessGroupMesh:
         self._ranks_to_group: Dict[Tuple[int, ...], ProcessGroup] = {}
         self._group_to_ranks: Dict[ProcessGroup, Tuple[int, ...]] = {}
 
-    def __del__(self):
+    def destroy_mesh_process_groups(self):
         r"""
         Destructor method for the ProcessGroupMesh class.
 
@@ -225,4 +225,3 @@ class ProcessGroupMesh:
             # no need to cache it explicitly, since it will be cached in `create_group_along_axis`
             return self.create_group_along_axis(axis, indices_at_axis, backend=backend)
         return self._ranks_to_group[ranks_in_group]
-    
