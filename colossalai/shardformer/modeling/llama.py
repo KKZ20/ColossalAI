@@ -491,7 +491,7 @@ def get_llama_flash_attention_forward():
     return forward
 
 
-def test_llama_seq_parallel_attention():
+def get_llama_seq_parallel_attention_forward():
     def rotate_half(x):
         """Rotates half the hidden dims of the input."""
         x1 = x[..., : x.shape[-1] // 2]
@@ -630,7 +630,7 @@ def test_llama_seq_parallel_attention():
     return forward
 
 
-def test_llama_seq_parallel_model():
+def get_llama_seq_parallel_model_forward():
     def forward(
         self,
         input_ids: torch.LongTensor = None,
