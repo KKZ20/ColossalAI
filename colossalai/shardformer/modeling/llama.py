@@ -446,9 +446,13 @@ def get_llama_flash_attention_forward(shard_config):
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
         # TODO should change to sp_size
-        if shard_config.test_seq_parallelism:
-            q_len *= 4
-            # q_len *= shard_config.sp_size
+        # if shard_config.test_seq_parallelism:
+        #     q_len *= 4
+        #     # q_len *= shard_config.sp_size
+
+        if shard_config.enable_sequence_parallelism and shard_config.sequence_parallelism_mode == "2":
+            q_len *= shard_config.sequence_parallel_size
+
         assert q_len % 4 == 0, "Flash Attention Error: The sequence length should be a multiple of 4."
 
         query_states = self.q_proj(hidden_states).view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
@@ -671,9 +675,12 @@ def test_llama_sequence_parallel_forward_fn(shard_config):
             raise ValueError("You have to specify either decoder_input_ids or decoder_inputs_embeds")
 
         # if shard_config.enable_sequence_parallelism:
-        seq_parallel = shard_config.test_seq_parallelism
+        seq_parallel = shard_config.enable_sequence_parallelism and shard_config.sequence_parallelism_mode == "2"
         if seq_parallel:
-            seq_length *= torch.distributed.get_world_size()
+            seq_length *= shard_config.sequence_parallel_size
+        print("seq_length: ", seq_length)
+        print("shard_config.sequence_parallel_size: ", shard_config.sequence_parallel_size)
+
         seq_length_with_past = seq_length
         past_key_values_length = 0
 
@@ -681,7 +688,7 @@ def test_llama_sequence_parallel_forward_fn(shard_config):
             past_key_values_length = past_key_values[0][0].shape[2]
             # if shard_config.enable_sequence_parallelism:
             if seq_parallel:
-                past_key_values_length *= torch.distributed.get_world_size()
+                past_key_values_length *= shard_config.sequence_parallel_size
             seq_length_with_past = seq_length_with_past + past_key_values_length
 
         if position_ids is None:

@@ -69,6 +69,9 @@ class LlamaPolicy(Policy):
                 decoder_attribute_replacement["num_key_value_groups"] = (
                     self.model.config.num_attention_heads // self.model.config.num_key_value_heads
                 )
+            policy[LlamaAttention] = ModulePolicyDescription(
+                attribute_replacement=decoder_attribute_replacement,
+            )
 
             self.append_or_create_method_replacement(
                 description={
@@ -84,8 +87,16 @@ class LlamaPolicy(Policy):
                 policy=policy,
                 target_key=LlamaModel,
             )
-
         elif sp_mode == "2":
+            self.append_or_create_method_replacement(
+                description={
+                    "forward": test_llama_sequence_parallel_forward_fn(self.shard_config),
+                },
+                policy=policy,
+                target_key=LlamaModel,
+            )
+
+        if self.shard_config.enable_tensor_parallelism:
             decoder_attribute_replacement = {
                 "self_attn.hidden_size": self.model.config.hidden_size // self.shard_config.tensor_parallel_size,
                 "self_attn.num_heads": self.model.config.num_attention_heads // self.shard_config.tensor_parallel_size,
@@ -143,14 +154,6 @@ class LlamaPolicy(Policy):
                 ),
                 policy=policy,
                 target_key=LlamaModel,
-            )
-
-            self.append_or_create_method_replacement(
-                description={
-                    "forward": test_llama_sequence_parallel_forward_fn(self.shard_config),
-                },
-                policy=policy,
-                target_key=LlamaAttention,
             )
 
         # optimization configuration
