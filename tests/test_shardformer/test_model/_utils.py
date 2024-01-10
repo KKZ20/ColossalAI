@@ -175,13 +175,6 @@ def run_forward_backward_with_hybrid_plugin(
     for k, v in data.items():
         if k == "labels":
             shard_test_data[k] = data[k].clone()
-        elif k == "attention_mask":
-            shard_test_data[k] = (
-                torch.chunk(data[k].clone(), booster.plugin.shard_config.sequence_parallel_size, dim=1)[dist.get_rank()]
-                if booster.plugin.shard_config.enable_sequence_parallelism
-                and booster.plugin.shard_config.sequence_parallelism_mode in ["2"]
-                else data[k].clone()
-            )
         else:
             shard_test_data[k] = (
                 torch.chunk(data[k].clone(), booster.plugin.shard_config.sequence_parallel_size, dim=1)[dist.get_rank()]

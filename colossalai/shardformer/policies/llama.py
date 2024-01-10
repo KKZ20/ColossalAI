@@ -13,7 +13,6 @@ from ..modeling.llama import (
     get_llama_flash_attention_forward,
     get_llama_seq_parallel_attention_forward,
     get_llama_seq_parallel_model_forward,
-    test_llama_sequence_parallel_forward_fn,
 )
 from .base_policy import ModulePolicyDescription, Policy, SubModuleReplacementDescription
 
@@ -47,50 +46,53 @@ class LlamaPolicy(Policy):
             norm_cls = RMSNorm
 
         sp_mode = self.shard_config.sequence_parallelism_mode if self.shard_config.enable_sequence_parallelism else None
+        sp_size = self.shard_config.sequence_parallel_size
         # overlap = self.shard_config.enable_sequence_overlap
         # sp_partial_derived = sp_mode in ["1"]
-
         # todo: Support SP for LlaMa model
         if sp_mode == "1":
             self.shard_config.enable_sequence_parallelism = False
             self.shard_config.sequence_parallelism_mode = None
             sp_mode = None
             warnings.warn("Llama doesn't support sequence parallelism now, will ignore the sequence parallelism flag.")
-        elif sp_mode == "3":
-            sequence_parallelism_size = self.shard_config.sequence_parallel_size
-            decoder_attribute_replacement = {
-                "num_heads": self.model.config.num_attention_heads // sequence_parallelism_size,
-                "head_dim": self.model.config.hidden_size // self.model.config.num_attention_heads,
-            }
-            if getattr(self.model.config, "num_key_value_heads", False):
-                decoder_attribute_replacement["num_key_value_heads"] = (
-                    self.model.config.num_key_value_heads // sequence_parallelism_size
-                )
-                decoder_attribute_replacement["num_key_value_groups"] = (
-                    self.model.config.num_attention_heads // self.model.config.num_key_value_heads
-                )
-            policy[LlamaAttention] = ModulePolicyDescription(
-                attribute_replacement=decoder_attribute_replacement,
-            )
-
+        elif sp_mode == "2":
             self.append_or_create_method_replacement(
                 description={
-                    "forward": get_llama_seq_parallel_attention_forward(),
+                    "forward": get_llama_seq_parallel_attention_forward(sp_mode, sp_size),
                 },
                 policy=policy,
                 target_key=LlamaAttention,
             )
             self.append_or_create_method_replacement(
                 description={
-                    "forward": get_llama_seq_parallel_model_forward(),
+                    "forward": get_llama_seq_parallel_model_forward(sp_mode, sp_size),
                 },
                 policy=policy,
                 target_key=LlamaModel,
             )
-        elif sp_mode == "2":
+        elif sp_mode == "3":
+            decoder_attribute_replacement = {
+                "num_heads": self.model.config.num_attention_heads // sp_size,
+                "head_dim": self.model.config.hidden_size // self.model.config.num_attention_heads,
+            }
+            if getattr(self.model.config, "num_key_value_heads", False):
+                decoder_attribute_replacement["num_key_value_heads"] = self.model.config.num_key_value_heads // sp_size
+                decoder_attribute_replacement["num_key_value_groups"] = (
+                    self.model.config.num_attention_heads // self.model.config.num_key_value_heads
+                )
+            policy[LlamaAttention] = ModulePolicyDescription(
+                attribute_replacement=decoder_attribute_replacement,
+            )
             self.append_or_create_method_replacement(
                 description={
-                    "forward": test_llama_sequence_parallel_forward_fn(self.shard_config),
+                    "forward": get_llama_seq_parallel_attention_forward(sp_mode, sp_size),
+                },
+                policy=policy,
+                target_key=LlamaAttention,
+            )
+            self.append_or_create_method_replacement(
+                description={
+                    "forward": get_llama_seq_parallel_model_forward(sp_mode, sp_size),
                 },
                 policy=policy,
                 target_key=LlamaModel,
@@ -185,7 +187,7 @@ class LlamaPolicy(Policy):
         if self.shard_config.enable_flash_attention:
             self.append_or_create_method_replacement(
                 description={
-                    "forward": get_llama_flash_attention_forward(self.shard_config),
+                    "forward": get_llama_flash_attention_forward(sp_mode, sp_size),
                 },
                 policy=policy,
                 target_key=LlamaAttention,
