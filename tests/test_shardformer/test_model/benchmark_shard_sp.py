@@ -21,6 +21,7 @@ def profile_shard(rank, model_fn, criterion, args, kwargs, file_path='./logs/pro
         activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
         #schedule=torch.profiler.schedule(wait=1, warmup=1, active=1),
         on_trace_ready=torch.profiler.tensorboard_trace_handler(file_path),
+        profile_memory=True,
     ) as prof:
 
         for _ in range(trials):
@@ -29,6 +30,17 @@ def profile_shard(rank, model_fn, criterion, args, kwargs, file_path='./logs/pro
             model_loss = criterion(model_output)
             model_loss.backward()
             torch.cuda.synchronize()
+
+    torch.cuda.memory._record_memory_history()
+
+    for _ in range(trials):
+        prof.step()
+        model_output = model_fn(*args, **kwargs)
+        model_loss = criterion(model_output)
+        model_loss.backward()
+        torch.cuda.synchronize()
+
+    torch.cuda.memory._dump_snapshot("my_snapshot.pickle")
 
 
 def bench_time_forward(rank, model_fn, args, kwargs):
@@ -85,7 +97,7 @@ def bench_time(rank, model_fn, criterion, args, kwargs):
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
 
-    timer = ColTimer(func, (), {}, in_ms=False)
+    timer = ColTimer(func, (), {}, in_ms=False, trials=1,warmup_trials=0)
 
     elaps_time = timer.time()
     peak_memory = torch.cuda.max_memory_allocated()
@@ -115,6 +127,14 @@ def bench_shard(rank):
             return loss
 
         data = data_gen_fn()
+        print(data)
+        for k, v in data.items():
+            size = list(v.shape)
+            tg_size = [1] * len(size)
+            tg_size[1] = 64 * 12
+            data[k] = v.repeat(tg_size)
+        for k, v in data.items():
+            print(v.shape)
 
         if (
             booster.plugin.shard_config.enable_sequence_parallelism
@@ -172,8 +192,8 @@ def bench_shard(rank):
             #sharded_output = sharded_model(**shard_test_data)
             #sharded_loss = criterion(sharded_output)
             #sharded_optimizer.backward(sharded_loss)
-            bench_time_forward(rank, sharded_model, args, shard_test_data)
-            bench_time_backward(rank, sharded_model, criterion, args, shard_test_data)
+            #bench_time_forward(rank, sharded_model, args, shard_test_data)
+            #bench_time_backward(rank, sharded_model, criterion, args, shard_test_data)
             bench_time(rank, sharded_model, criterion, args, shard_test_data)
 
             if bench_config.profile is True:
@@ -190,12 +210,12 @@ def bench_shard(rank):
         #org_output = org_model(**unshard_test_data)
         #org_loss = criterion(org_output)
         #org_loss.backward()
-        bench_time_forward(rank, org_model, args, unshard_test_data)
-        bench_time_backward(rank, org_model, criterion, args, unshard_test_data)
-        bench_time(rank, org_model, criterion, args, unshard_test_data)
+        #bench_time_forward(rank, org_model, args, unshard_test_data)
+        #bench_time_backward(rank, org_model, criterion, args, unshard_test_data)
+        #bench_time(rank, org_model, criterion, args, unshard_test_data)
 
-        if bench_config.profile is True:
-            profile_shard(rank, org_model, criterion, args, unshard_test_data, file_path='./logs/bench_sp_org_model')
+        #if bench_config.profile is True:
+        #    profile_shard(rank, org_model, criterion, args, unshard_test_data, file_path='./logs/bench_sp_org_model')
 
 
 
