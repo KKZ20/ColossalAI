@@ -24,6 +24,7 @@ from colossalai.tensor.d_tensor.api import (
 
 from ._operation import (
     gather_forward_split_backward,
+    reducescatter_forward_gather_backward,
     linear_gather_forward_reducescatter_backward,
     linear_reducescatter_forward_gather_backward,
     linear_with_async_comm,
@@ -199,7 +200,9 @@ class Linear1D_Col(ParallelModule):
 
         if self.seq_parallel_mode is None:
             output_parallel = linear_with_async_comm(input_parallel, self.weight, bias, self.process_group, True)
-        elif self.seq_parallel_mode in ["1", "2"]:
+        elif self.seq_parallel_mode == "1":
+            output_parallel = linear_with_async_comm(input_parallel, self.weight, bias, self.process_group, False)
+        elif self.seq_parallel_mode == "2":
             output_parallel = linear_gather_forward_reducescatter_backward(
                 input_parallel, self.weight, bias, self.process_group, True, self.seq_parallel_dim, self.overlap
             )
@@ -414,15 +417,8 @@ class Linear1D_Row(ParallelModule):
                 output_parallel = linear_with_async_comm(input_, self.weight, None, None, False)
                 output = reduce_forward(output_parallel, self.process_group)
             elif self.seq_parallel_mode == "1":
-                output_parallel = linear_with_async_comm(input_, self.weight, None, None, False)
-                output = linear_reducescatter_forward_gather_backward(
-                    output_parallel, self.process_group, self.seq_parallel_dim
-                )
+                output = linear_with_async_comm(input_, self.weight, None, None, False)
             elif self.seq_parallel_mode == "2":
-                # TODO how to maintain compatibility?
-                # output = reducescatter_forward_gather_backward(
-                #    output_parallel, self.process_group, self.seq_parallel_dim
-                # )
                 output = linear_reducescatter_forward_gather_backward(
                     input_,
                     self.weight,
