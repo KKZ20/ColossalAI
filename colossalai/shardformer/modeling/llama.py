@@ -626,11 +626,11 @@ def get_llama_seq_parallel_attention_forward(sp_mode, sp_size, sp_group):
         # TODO (linshengjie) Block attention with ring
         ####
         block_wise = False
-        if block_wise:
-            seq_block = query_states.shape[2]
+        seq_len = query_states[2]
+        seq_block = 1024
+        if block_wise and seq_len > seq_block:
             assert query_states.shape[2] % seq_block == 0
             block_num = query_states.shape[2] // seq_block
-            #assert block_num == 1
 
             query_states_chunks = query_states.chunk(block_num, dim=2)
             if attention_mask is not None:
@@ -639,33 +639,11 @@ def get_llama_seq_parallel_attention_forward(sp_mode, sp_size, sp_group):
 
 
             for i in range(block_num):
-                #attn_weights = torch.matmul(query_states_chunks[i], key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
-                #if attention_mask is not None:
-                #    attn_weights = attn_weights + attention_mask_chunks[i]
-                #attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-                #attn_output_chunks.append(torch.matmul(attn_weights, value_states))
-                def custom_forward():
-                    def block_attn(query_states, attention_mask, key_states, value_states, head_dim):
-                        attn_weights = torch.matmul(query_states_chunks[i], key_states.transpose(2, 3)) / math.sqrt(head_dim)
-                        if attention_mask is not None:
-                            attn_weights = attn_weights + attention_mask_chunks[i]
-                        attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
-                        return torch.matmul(attn_weights, value_states)
-
-                    def block_attn_forward(*inputs):
-                        return block_attn(*inputs)
-
-                    return block_attn_forward
-                key_states_ref = key_states
-                value_states_ref = value_states
-                attn_output_chunks.append(torch.utils.checkpoint.checkpoint(
-                    custom_forward(),
-                    query_states_chunks[i],
-                    attention_mask_chunks[i] if attention_mask is not None else None,
-                    key_states_ref,
-                    value_states_ref,
-                    self.head_dim
-                ))
+                attn_weights = torch.matmul(query_states_chunks[i], key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
+                if attention_mask is not None:
+                    attn_weights = attn_weights + attention_mask_chunks[i]
+                attn_weights = nn.functional.softmax(attn_weights, dim=-1, dtype=torch.float32).to(query_states.dtype)
+                attn_output_chunks.append(torch.matmul(attn_weights, value_states))
             attn_output = torch.cat(attn_output_chunks, dim=2)
 
         else:
