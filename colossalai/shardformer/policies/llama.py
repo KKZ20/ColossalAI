@@ -56,7 +56,7 @@ class LlamaPolicy(Policy):
         if sp_mode == "1":
             self.append_or_create_method_replacement(
                 description={
-                    "forward": get_llama_seq_parallel_model_forward(sp_mode, sp_size),
+                    "forward": get_llama_seq_parallel_model_forward(sp_mode, sp_size, sp_group),
                 },
                 policy=policy,
                 target_key=LlamaModel,
@@ -71,7 +71,7 @@ class LlamaPolicy(Policy):
             )
             self.append_or_create_method_replacement(
                 description={
-                    "forward": get_llama_seq_parallel_model_forward(sp_mode, sp_size),
+                    "forward": get_llama_seq_parallel_model_forward(sp_mode, sp_size, sp_group),
                 },
                 policy=policy,
                 target_key=LlamaModel,
@@ -98,7 +98,7 @@ class LlamaPolicy(Policy):
             )
             self.append_or_create_method_replacement(
                 description={
-                    "forward": get_llama_seq_parallel_model_forward(sp_mode, sp_size),
+                    "forward": get_llama_seq_parallel_model_forward(sp_mode, sp_size, sp_group),
                 },
                 policy=policy,
                 target_key=LlamaModel,
@@ -183,7 +183,7 @@ class LlamaPolicy(Policy):
         if sp_mode == "1":
             self.append_or_create_method_replacement(
                 description={
-                    "forward": get_llama_decoder_seq_parallel_model_forward(sp_mode, sp_size),
+                    "forward": get_llama_decoder_seq_parallel_model_forward(sp_mode, sp_size, sp_group),
                 },
                 policy=policy,
                 target_key=LlamaDecoderLayer,

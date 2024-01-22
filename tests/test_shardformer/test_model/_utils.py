@@ -157,11 +157,6 @@ def run_forward_backward_with_hybrid_plugin(
         return loss
 
     data = data_gen_fn()
-    # for k, v in data.items():
-    #     size = list(v.shape)
-    #     tg_size = [1] * len(size)
-    #     tg_size[1] = 64 * 2
-    #     data[k] = v.repeat(tg_size)
 
     if (
         booster.plugin.shard_config.enable_sequence_parallelism
@@ -182,9 +177,11 @@ def run_forward_backward_with_hybrid_plugin(
             shard_test_data[k] = data[k].clone()
         else:
             shard_test_data[k] = (
-                torch.chunk(data[k].clone(), booster.plugin.shard_config.sequence_parallel_size, dim=1)[dist.get_rank()]
+                torch.chunk(data[k].clone(), booster.plugin.shard_config.sequence_parallel_size, dim=1)[
+                    dist.get_rank(booster.plugin.shard_config.sequence_parallel_process_group)
+                ]
                 if booster.plugin.shard_config.enable_sequence_parallelism
-                and booster.plugin.shard_config.sequence_parallelism_mode in ["2", "3"]
+                and booster.plugin.shard_config.sequence_parallelism_mode in ["1", "2", "3"]
                 else data[k].clone()
             )
     unshard_test_data = {}
@@ -224,7 +221,6 @@ def run_forward_backward_with_hybrid_plugin(
     org_loss.backward()
 
     return org_loss, org_output, sharded_loss, sharded_output
-    # return sharded_loss, sharded_output, sharded_loss, sharded_output
 
 
 def check_output_hidden_state(

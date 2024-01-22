@@ -461,7 +461,7 @@ def get_llama_flash_attention_forward(shard_config):
         
         if sp_mode == "2":
             q_len *= shard_config.sequence_parallel_size
-        # assert q_len % 4 == 0, "Flash Attention Error: The sequence length should be a multiple of 4."
+        assert q_len % 4 == 0, "Flash Attention Error: The sequence length should be a multiple of 4."
         
         query_states = self.q_proj(hidden_states)
         key_states = self.k_proj(hidden_states)
@@ -503,8 +503,11 @@ def get_llama_flash_attention_forward(shard_config):
 
         flash_attention_mask = None
         attn_mask_type = AttnMaskType.causal
+
+        # TODO Internal function
+        use_distributed_mask = False
         if not getattr(shard_config, "causal_lm", False) and attention_mask != None:
-            if shard_config.enable_sequence_parallelism:
+            if use_distributed_mask is True:
                 flash_attention_mask = attention_mask
             else:
                 if attention_mask.size() != (bsz, 1, q_len, kv_seq_len):
@@ -529,7 +532,7 @@ def get_llama_flash_attention_forward(shard_config):
 
     return forward
 
-def get_llama_seq_parallel_attention_forward(sp_mode, sp_size):
+def get_llama_seq_parallel_attention_forward(sp_mode, sp_size, sp_group):
     def rotate_half(x):
         """Rotates half the hidden dims of the input."""
         x1 = x[..., : x.shape[-1] // 2]
@@ -716,13 +719,13 @@ def get_llama_seq_parallel_attention_forward(sp_mode, sp_size):
 
 import torch.distributed as dist
 
-def get_llama_seq_parallel_model_forward(sp_mode, sp_size):
+def get_llama_seq_parallel_model_forward(sp_mode, sp_size, sp_group):
 
     logger = logging.get_logger(__name__)
 
     # Copied from transformers.models.bart.modeling_bart._make_causal_mask
     def _make_causal_mask_partial(
-        input_ids_shape: torch.Size, dtype: torch.dtype, device: torch.device, past_key_values_length: int = 0
+        input_ids_shape: torch.Size, dtype: torch.dtype, device: torch.device, past_key_values_length: int = 0, sp_group = None
     ):
         """
         Make causal mask used for bi-directional self-attention.
@@ -747,7 +750,7 @@ def get_llama_seq_parallel_model_forward(sp_mode, sp_size):
 
 
     # Copied from transformers.models.bart.modeling_bart._expand_mask
-    def _expand_mask_partial(mask: torch.Tensor, dtype: torch.dtype, tgt_len: Optional[int] = None):
+    def _expand_mask_partial(mask: torch.Tensor, dtype: torch.dtype, tgt_len: Optional[int] = None, sp_group = None):
         """
         Expands attention_mask from `[bsz, seq_len]` to `[bsz, 1, tgt_seq_len, src_seq_len]`.
         """
@@ -764,7 +767,7 @@ def get_llama_seq_parallel_model_forward(sp_mode, sp_size):
 
 
     # Copied from transformers.models.bart.modeling_bart.BartDecoder._prepare_decoder_attention_mask
-    def _prepare_decoder_attention_mask_partial(attention_mask, input_shape, inputs_embeds, past_key_values_length):
+    def _prepare_decoder_attention_mask_partial(attention_mask, input_shape, inputs_embeds, past_key_values_length, sp_group = None):
         # create causal mask
         # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
         combined_attention_mask = None
@@ -774,11 +777,12 @@ def get_llama_seq_parallel_model_forward(sp_mode, sp_size):
                 inputs_embeds.dtype,
                 device=inputs_embeds.device,
                 past_key_values_length=past_key_values_length,
+                sp_group=sp_group
             )
 
         if attention_mask is not None:
             # [bsz, seq_len] -> [bsz, 1, tgt_seq_len, src_seq_len]
-            expanded_attn_mask = _expand_mask_partial(attention_mask, inputs_embeds.dtype, tgt_len=input_shape[-1]).to(
+            expanded_attn_mask = _expand_mask_partial(attention_mask, inputs_embeds.dtype, tgt_len=input_shape[-1], sp_group=sp_group).to(
                 inputs_embeds.device
             )
             combined_attention_mask = (
@@ -841,34 +845,37 @@ def get_llama_seq_parallel_model_forward(sp_mode, sp_size):
 
         if inputs_embeds is None:
             if sp_mode in ["1", "2"]:
-                input_ids = _gather(input_ids, 1, None)
+                input_ids = _gather(input_ids, 1, sp_group)
                 inputs_embeds = self.embed_tokens(input_ids)
-                input_ids = input_ids.chunk(sp_size, dim=1)[torch.distributed.get_rank()]
-                inputs_embeds = split_forward_gather_backward(inputs_embeds, 1, None)
+                input_ids = input_ids.chunk(sp_size, dim=1)[torch.distributed.get_rank(sp_group)]
+                inputs_embeds = split_forward_gather_backward(inputs_embeds, 1, sp_group)
             else:
                 inputs_embeds = self.embed_tokens(input_ids)
 
+        # TODO Internal function
+        use_distributed_mask = False
+
         # embed positions
-        if sp_mode is None:
+        if sp_mode is None or use_distributed_mask is False:
             if attention_mask is None:
                 attention_mask = torch.ones(
                     (batch_size, seq_length_with_past), dtype=torch.bool, device=inputs_embeds.device
                 )
-                attention_mask = _gather(attention_mask, 1, None)
-                attention_mask = self._prepare_decoder_attention_mask(
-                    attention_mask, attention_mask.shape, inputs_embeds, past_key_values_length
-                )
+            attention_mask = _gather(attention_mask, 1, sp_group)
+            attention_mask = self._prepare_decoder_attention_mask(
+                attention_mask, attention_mask.shape, inputs_embeds, past_key_values_length
+            )
         else:
-            world_size = dist.get_world_size()
+            world_size = dist.get_world_size(sp_group)
             assert seq_length_with_past % world_size == 0
             attention_mask = torch.ones(
                 (batch_size, seq_length_with_past // world_size), dtype=torch.bool, device=inputs_embeds.device
             )
             attention_mask = _prepare_decoder_attention_mask_partial(
-                attention_mask, attention_mask.shape, inputs_embeds, past_key_values_length
+                attention_mask, attention_mask.shape, inputs_embeds, past_key_values_length, sp_group
             )
             attention_mask = ~(attention_mask[:, :, -1].squeeze(1).to(torch.bool)).contiguous()
-            attention_mask = _gather(attention_mask, 1, None)
+            attention_mask = _gather(attention_mask, 1, sp_group)
 
         hidden_states = inputs_embeds
 
@@ -925,7 +932,7 @@ def get_llama_seq_parallel_model_forward(sp_mode, sp_size):
         hidden_states = self.norm(hidden_states)
 
         # Todo: Maybe this line can be optimized
-        hidden_states = gather_forward_split_backward(hidden_states, 1, None)
+        hidden_states = gather_forward_split_backward(hidden_states, 1, sp_group)
 
         # add hidden states from the last decoder layer
         if output_hidden_states:
@@ -1050,7 +1057,7 @@ def get_lm_forward_with_dist_cross_entropy(shard_config: ShardConfig):
     return forward
 
 
-def get_llama_decoder_seq_parallel_model_forward(sp_mode, sp_size):
+def get_llama_decoder_seq_parallel_model_forward(sp_mode, sp_size, sp_group):
 
     def forward(
         self,
@@ -1080,7 +1087,7 @@ def get_llama_decoder_seq_parallel_model_forward(sp_mode, sp_size):
         hidden_states = self.input_layernorm(hidden_states)
 
         if sp_mode == "1":
-            hidden_states = gather_forward_reducescatter_backward(hidden_states, None, 1)
+            hidden_states = gather_forward_reducescatter_backward(hidden_states, sp_group, 1)
 
         # Self Attention
         hidden_states, self_attn_weights, present_key_value = self.self_attn(
@@ -1093,19 +1100,19 @@ def get_llama_decoder_seq_parallel_model_forward(sp_mode, sp_size):
         )
 
         if sp_mode == "1":
-            hidden_states = reducescatter_forward_gather_backward(hidden_states, None, 1)
+            hidden_states = reducescatter_forward_gather_backward(hidden_states, sp_group, 1)
         hidden_states = residual + hidden_states
 
         # Fully Connected
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
         if sp_mode == "1":
-            hidden_states = gather_forward_reducescatter_backward(hidden_states, None, 1)
+            hidden_states = gather_forward_reducescatter_backward(hidden_states, sp_group, 1)
 
         hidden_states = self.mlp(hidden_states)
 
         if sp_mode == "1":
-            hidden_states = reducescatter_forward_gather_backward(hidden_states, None, 1)
+            hidden_states = reducescatter_forward_gather_backward(hidden_states, sp_group, 1)
         hidden_states = residual + hidden_states
 
         outputs = (hidden_states,)
