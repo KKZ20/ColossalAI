@@ -790,6 +790,18 @@ def get_llama_seq_parallel_model_forward(sp_mode, sp_size, sp_group):
 
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
+        if sp_mode == "1":
+            if input_ids is not None:
+                input_ids = split_forward_gather_backward(input_ids, dim=1, process_group=sp_group)
+            if attention_mask is not None:
+                attention_mask = split_forward_gather_backward(attention_mask, dim=1, process_group=sp_group)
+            if position_ids is not None:
+                position_ids = split_forward_gather_backward(position_ids, dim=1, process_group=sp_group)
+            if past_key_values is not None:
+                past_key_values = split_forward_gather_backward(past_key_values, dim=1, process_group=sp_group)
+            if inputs_embeds is not None:
+                inputs_embeds = split_forward_gather_backward(inputs_embeds, dim=1, process_group=sp_group)
+
         # retrieve input_ids and inputs_embeds
         if input_ids is not None and inputs_embeds is not None:
             raise ValueError("You cannot specify both decoder_input_ids and decoder_inputs_embeds at the same time")

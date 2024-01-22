@@ -181,7 +181,7 @@ def run_forward_backward_with_hybrid_plugin(
                     dist.get_rank(booster.plugin.shard_config.sequence_parallel_process_group)
                 ]
                 if booster.plugin.shard_config.enable_sequence_parallelism
-                and booster.plugin.shard_config.sequence_parallelism_mode in ["1", "2", "3"]
+                and booster.plugin.shard_config.sequence_parallelism_mode in ["2", "3"]
                 else data[k].clone()
             )
     unshard_test_data = {}
