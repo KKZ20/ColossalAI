@@ -106,11 +106,12 @@ class ShardConfig:
         self.enable_fused_normalization = True
         self.enable_flash_attention = True
         self.enable_jit_fused = True
-        self.enable_sequence_parallelism = True
-        self.enable_sequence_overlap = True
-        # todo modify default sequence parallelism mode and process group
-        self.sequence_parallelism_mode = "1"
-        self.sequence_parallel_process_group = self.tensor_parallel_process_group
+        if self.enable_tensor_parallelism:
+            self.enable_sequence_parallelism = True
+            self.enable_sequence_overlap = True
+            # todo modify default sequence parallelism mode and process group
+            self.sequence_parallelism_mode = "1"
+            self.sequence_parallel_process_group = self.tensor_parallel_process_group
 
     def _infer(self):
         """

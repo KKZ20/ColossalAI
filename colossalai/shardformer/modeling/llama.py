@@ -459,14 +459,14 @@ def get_llama_flash_attention_forward(shard_config):
         sp_mode = shard_config.sequence_parallelism_mode
         sp_size = shard_config.sequence_parallel_size
         
-        if sp_mode == "2":
+        if sp_mode in["1", "2"]:
             q_len *= shard_config.sequence_parallel_size
         assert q_len % 4 == 0, "Flash Attention Error: The sequence length should be a multiple of 4."
         
         query_states = self.q_proj(hidden_states)
         key_states = self.k_proj(hidden_states)
         value_states = self.v_proj(hidden_states)
-        
+
         # sp: all-to-all comminucation when introducing sequence parallel
         if sp_mode == "3":
             query_states = all_to_all_comm(query_states)
@@ -474,6 +474,8 @@ def get_llama_flash_attention_forward(shard_config):
             value_states = all_to_all_comm(value_states)
             bsz, q_len, _ = query_states.size()
 
+        if shard_config.sequence_parallel_size < 4:
+            print(query_states.shape)
         query_states = query_states.view(bsz, q_len, self.num_heads, self.head_dim).transpose(1, 2)
         key_states = key_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
         value_states = value_states.view(bsz, q_len, self.num_key_value_heads, self.head_dim).transpose(1, 2)
@@ -571,7 +573,7 @@ def get_llama_seq_parallel_attention_forward(sp_mode, sp_size, sp_group):
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
         bsz, q_len, _ = hidden_states.size()
         # sp: modify sp_len when sequence parallel mode is 2
-        if sp_mode == "2":
+        if sp_mode in["1", "2"]:
             q_len *= sp_size
         if self.config.pretraining_tp > 1:
             key_value_slicing = (self.num_key_value_heads * self.head_dim) // self.config.pretraining_tp
@@ -790,18 +792,6 @@ def get_llama_seq_parallel_model_forward(sp_mode, sp_size, sp_group):
 
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        if sp_mode == "1":
-            if input_ids is not None:
-                input_ids = split_forward_gather_backward(input_ids, dim=1, process_group=sp_group)
-            if attention_mask is not None:
-                attention_mask = split_forward_gather_backward(attention_mask, dim=1, process_group=sp_group)
-            if position_ids is not None:
-                position_ids = split_forward_gather_backward(position_ids, dim=1, process_group=sp_group)
-            if past_key_values is not None:
-                past_key_values = split_forward_gather_backward(past_key_values, dim=1, process_group=sp_group)
-            if inputs_embeds is not None:
-                inputs_embeds = split_forward_gather_backward(inputs_embeds, dim=1, process_group=sp_group)
-
         # retrieve input_ids and inputs_embeds
         if input_ids is not None and inputs_embeds is not None:
             raise ValueError("You cannot specify both decoder_input_ids and decoder_inputs_embeds at the same time")
@@ -813,7 +803,8 @@ def get_llama_seq_parallel_model_forward(sp_mode, sp_size, sp_group):
             raise ValueError("You have to specify either decoder_input_ids or decoder_inputs_embeds")
 
         # sp: modify seq_length when using sequence parallel
-        seq_length *= sp_size
+        if sp_mode in ["2", "3"]:
+            seq_length *= sp_size
 
         seq_length_with_past = seq_length
         past_key_values_length = 0
@@ -834,7 +825,7 @@ def get_llama_seq_parallel_model_forward(sp_mode, sp_size, sp_group):
             position_ids = position_ids.view(-1, seq_length).long()
 
         if inputs_embeds is None:
-            if sp_mode in ["1", "2"]:
+            if sp_mode == "2":
                 input_ids = _gather(input_ids, 1, sp_group)
                 inputs_embeds = self.embed_tokens(input_ids)
                 input_ids = input_ids.chunk(sp_size, dim=1)[torch.distributed.get_rank(sp_group)]
@@ -851,7 +842,10 @@ def get_llama_seq_parallel_model_forward(sp_mode, sp_size, sp_group):
                 attention_mask = torch.ones(
                     (batch_size, seq_length_with_past), dtype=torch.bool, device=inputs_embeds.device
                 )
-            attention_mask = _gather(attention_mask, 1, sp_group)
+
+            if sp_mode in ["2", "3"]:
+                attention_mask = _gather(attention_mask, 1, sp_group)
+
             attention_mask = self._prepare_decoder_attention_mask(
                 attention_mask, attention_mask.shape, inputs_embeds, past_key_values_length
             )
@@ -868,8 +862,10 @@ def get_llama_seq_parallel_model_forward(sp_mode, sp_size, sp_group):
             attention_mask = _gather(attention_mask, 1, sp_group)
 
         hidden_states = inputs_embeds
+        if sp_mode == "1":
+            hidden_states = split_forward_gather_backward(hidden_states, 1, sp_group)
 
-        if (self.gradient_checkpointing or sp_mode is not None) and self.training:
+        if (self.gradient_checkpointing or sp_mode in ["2", "3"]) and self.training:
             if use_cache:
                 logger.warning_once(
                     "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`..."
@@ -886,7 +882,7 @@ def get_llama_seq_parallel_model_forward(sp_mode, sp_size, sp_group):
                 all_hidden_states += (hidden_states,)
 
             past_key_value = past_key_values[idx] if past_key_values is not None else None
-            if (self.gradient_checkpointing or sp_mode is not None) and self.training:
+            if (self.gradient_checkpointing or sp_mode in ["2", "3"]) and self.training:
                 def create_custom_forward(module):
                     def custom_forward(*inputs):
                         # None for past_key_value

@@ -61,6 +61,13 @@ class LlamaPolicy(Policy):
                 policy=policy,
                 target_key=LlamaModel,
             )
+            self.append_or_create_method_replacement(
+                description={
+                    "forward": get_llama_seq_parallel_attention_forward(sp_mode, sp_size, sp_group),
+                },
+                policy=policy,
+                target_key=LlamaAttention,
+            )
         elif sp_mode == "2":
             self.append_or_create_method_replacement(
                 description={
@@ -180,7 +187,8 @@ class LlamaPolicy(Policy):
             target_key=LlamaDecoderLayer,
         )
 
-        if sp_mode == "1":
+        '''
+        if sp_mode == "1" and False:
             self.append_or_create_method_replacement(
                 description={
                     "forward": get_llama_decoder_seq_parallel_model_forward(sp_mode, sp_size, sp_group),
@@ -188,6 +196,7 @@ class LlamaPolicy(Policy):
                 policy=policy,
                 target_key=LlamaDecoderLayer,
             )
+        '''
 
         self.append_or_create_submodule_replacement(
             description=SubModuleReplacementDescription(
