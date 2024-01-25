@@ -630,7 +630,7 @@ def get_llama_seq_parallel_attention_forward(sp_mode, sp_size, sp_group):
         # TODO (linshengjie) Block attention with ring
         ####
         block_wise = False
-        seq_len = query_states[2]
+        seq_len = query_states.shape[2]
         seq_block = 1024
         if block_wise and seq_len > seq_block:
             assert query_states.shape[2] % seq_block == 0

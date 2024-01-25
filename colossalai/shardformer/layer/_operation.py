@@ -169,47 +169,57 @@ class LinearWithAsyncCommunication(torch.autograd.Function):
         return grad_input, grad_weight, grad_bias, None, None, None
 
 
-def _AllgatherLinear(input_, weight, process_group):
+def _ring_as_gather(func, input_to_gather=None, input_local=None, process_group=None, gather_dim=1, keep_item=False):
+    # currently only support one single tensor as output
     group_size = dist.get_world_size(process_group)
     cur_rank = dist.get_rank(process_group)
 
-    input_shape = input_.shape
-    weight_shape = weight.shape
-
-    output_tensors = [torch.empty((input_shape[0], input_shape[1], weight_shape[0])) for _ in range(group_size)]
+    #output_tensors = [torch.empty((input_shape[0], input_shape[1], weight_shape[0])) for _ in range(group_size)]
 
     # initialization of ring communication
-    input_shape[1]
     recv_rank = cur_rank + 1 if cur_rank + 1 < group_size else 0
     send_rank = cur_rank - 1 if cur_rank > 0 else group_size - 1
-    recv_tensor = input_.clone()
-    send_tensor = input_.clone()
+    recv_tensors = {}
+    send_tensors = {}
+    for k, v in input_to_gather.items():
+        recv_tensors[k] = v.clone()
+        send_tensors[k] = v.clone()
 
-    recv_op = dist.P2POp(dist.irecv, recv_tensor, recv_rank, group=process_group)
-    send_op = dist.P2POp(dist.isend, send_tensor, send_rank, group=process_group)
-    handles = dist.batch_isend_irecv([send_op, recv_op])
+    def communicate_step():
+        comm_ops = []
+        for k in recv_tensors:
+            comm_ops.append(dist.P2POp(dist.irecv, recv_tensors[k], recv_rank, group=process_group))
+            comm_ops.append(dist.P2POp(dist.isend, send_tensors[k], send_rank, group=process_group))
+        return dist.batch_isend_irecv(comm_ops)
+
+    def switch_step():
+        for k in recv_tensors:
+            tmp_tensor = send_tensors[k]
+            send_tensors[k] = recv_tensors[k]
+            recv_tensors[k] = tmp_tensor
+
+    output_tensors = []
+
+    handles = communicate_step()
     # first round: special case, retrive from local tensor
-    output_tensors[0] = F.linear(input_, weight)
+    output_tensors.append(func(**input_to_gather, **input_local))
     for i in range(group_size - 2):
         for handle in handles:
             handle.wait()
 
-        tmp_tensor = send_tensor
-        send_tensor = recv_tensor
-        recv_tensor = tmp_tensor
+        switch_step()
 
-        recv_op = dist.P2POp(dist.irecv, recv_tensor, recv_rank, group=process_group)
-        send_op = dist.P2POp(dist.isend, send_tensor, send_rank, group=process_group)
-        handles = dist.batch_isend_irecv([recv_op, send_op])
+        handles = communicate_step()
 
         # actual computation
-        output_tensors[i + 1] = F.linear(send_tensor, weight)
+        output_tensors.append(func(**send_tensors, **input_local))
 
     # final round: special case, no need to send/recv again
     for handle in handles:
         handle.wait()
-    output_tensors[group_size - 1] = F.linear(recv_tensor, weight)
-    return torch.cat(output_tensors[group_size - cur_rank :] + output_tensors[: group_size - cur_rank], dim=1)
+    output_tensors.append(func(**recv_tensors, **input_local))
+
+    return torch.cat(output_tensors[group_size - cur_rank :] + output_tensors[: group_size - cur_rank], dim=gather_dim)
 
 
 class _GatherForwardReduceScatterBackward(torch.autograd.Function):
@@ -268,11 +278,28 @@ class _LinearWithGatherForwardReduceScatterBackward(torch.autograd.Function):
         ctx.dim = dim
         ctx.overlap = overlap
 
-        if bias is not None:
-            input_parallel = _gather(input_, dim, process_group)
-            output = F.linear(input_parallel, weight, bias)
+        ring = True
+        if ring is True:
+            input_to_gather = {}
+            input_local = {}
+            input_to_gather['input'] = input_
+            input_local['weight'] = weight
+
+            if bias is not None:
+                input_local['bias'] = bias
+
+            output = _ring_as_gather(
+                F.linear, 
+                input_to_gather=input_to_gather, 
+                input_local=input_local, 
+                process_group=process_group,
+            )
         else:
-            output = _AllgatherLinear(input_, weight, process_group)
+            input_parallel = _gather(input_, dim, process_group)
+            if bias is not None:
+                output = F.linear(input_parallel, weight, bias)
+            else:
+                output = F.linear(input_parallel, weight)
 
         return output
 
@@ -379,31 +406,40 @@ class _LinearWithGatherForwardReduceScatterBackward(torch.autograd.Function):
         return output, grad_weight, grad_bias, None, None, None, None
 
 
-def _ReduceScatterLinear(input_, weight, process_group):
+def _ring_as_reducescatter(func, input_to_reducescatter=None, input_local=None, process_group=None, reducescatter_dim=1):
+    # currently only support one single tensor as output
     group_size = dist.get_world_size(process_group)
     cur_rank = dist.get_rank(process_group)
 
-    input_shape = input_.shape
-
     # initialization of ring communication
-    # communicate(e.g.): 0->1->2->3
-    # compute(e.g.): 3->2->1->0
-    input_tensors = list(torch.split(input_, int(input_shape[1] / group_size), dim=1))
-    input_tensors = input_tensors[cur_rank:] + input_tensors[:cur_rank]
-    input_tensors.reverse()
     recv_rank = cur_rank - 1 if cur_rank > 0 else group_size - 1
     send_rank = cur_rank + 1 if cur_rank + 1 < group_size else 0
+    input_tensors = []
+    for _ in range(group_size):
+        input_tensors.append({})
+    for k, v in input_to_reducescatter.items():
+        input_shape = v.shape
+        assert input_shape[reducescatter_dim] % group_size == 0
+        _input_tensors = list(torch.split(v, input_shape[reducescatter_dim] // group_size, dim=reducescatter_dim))
+        for i in range(group_size):
+            input_tensors[i][k] = _input_tensors[i]
+    input_tensors = input_tensors[cur_rank:] + input_tensors[:cur_rank]
+    input_tensors.reverse()
 
-    # first round: special case, no reduce operation
-    output_tensor = F.linear(input_tensors[0], weight)
+    output_tensor = func(**input_tensors[0], **input_local)
     recv_tensor = output_tensor.clone()
     send_tensor = output_tensor.clone()
-    recv_op = dist.P2POp(dist.irecv, recv_tensor, recv_rank, group=process_group)
-    send_op = dist.P2POp(dist.isend, send_tensor, send_rank, group=process_group)
-    handles = dist.batch_isend_irecv([recv_op, send_op])
+
+    def communicate_step():
+        recv_op = dist.P2POp(dist.irecv, recv_tensor, recv_rank, group=process_group)
+        send_op = dist.P2POp(dist.isend, send_tensor, send_rank, group=process_group)
+        return dist.batch_isend_irecv([recv_op, send_op])
+
+    handles = communicate_step()
+    # first round: special case, retrive from local tensor
     for i in range(group_size - 2):
         # actual computation
-        output_tensor = F.linear(input_tensors[i + 1], weight)
+        output_tensor = func(**input_tensors[i + 1], **input_local)
 
         for handle in handles:
             handle.wait()
@@ -413,12 +449,10 @@ def _ReduceScatterLinear(input_, weight, process_group):
         send_tensor = output_tensor
         output_tensor = tmp_tensor
 
-        recv_op = dist.P2POp(dist.irecv, recv_tensor, recv_rank, group=process_group)
-        send_op = dist.P2POp(dist.isend, send_tensor, send_rank, group=process_group)
-        handles = dist.batch_isend_irecv([recv_op, send_op])
+        handles = communicate_step()
 
     # final round: special case, no need to send/recv again
-    output_tensor = F.linear(input_tensors[group_size - 1], weight)
+    output_tensor = func(**input_tensors[-1], **input_local)
     for handle in handles:
         handle.wait()
     output_tensor += recv_tensor
@@ -441,22 +475,41 @@ class _LinearWithReduceScatterForwardGatherBackward(torch.autograd.Function):
         ctx.use_bias = bias is not None
         ctx.process_group = process_group
         ctx.dim = dim
-        if bias is not None:
-            partial_output = F.linear(input_, weight, bias)
+
+        ring = True
+
+        if ring is True:
+            input_to_reducescatter = {}
+            input_local = {}
+            input_to_reducescatter['input'] = input_
+            input_local['weight'] = weight
+
+            if bias is not None:
+                input_to_reducescatter['bias'] = bias
+
+            output = _ring_as_reducescatter(
+                F.linear, 
+                input_to_reducescatter=input_to_reducescatter, 
+                input_local=input_local, 
+                process_group=process_group,
+            )
         else:
-            return _ReduceScatterLinear(input_, weight, process_group)
+            if bias is not None:
+                partial_output = F.linear(input_, weight, bias)
+            else:
+                partial_output = F.linear(input_, weight)
 
-        output_shape = list(partial_output.shape)
-        assert (
-            output_shape[dim] % dist.get_world_size(process_group) == 0
-        ), f"The dimension to split ({output_shape[dim]}) is not a multiple of tensor parallel size ({dist.get_world_size(process_group)}). "
-        output_shape[dim] = output_shape[dim] // dist.get_world_size(process_group)
+            output_shape = list(partial_output.shape)
+            assert (
+                output_shape[dim] % dist.get_world_size(process_group) == 0
+            ), f"The dimension to split ({output_shape[dim]}) is not a multiple of tensor parallel size ({dist.get_world_size(process_group)}). "
+            output_shape[dim] = output_shape[dim] // dist.get_world_size(process_group)
 
-        output_list = [
-            item.contiguous() for item in torch.chunk(partial_output, dist.get_world_size(process_group), dim=dim)
-        ]
-        output = torch.empty(output_shape, dtype=partial_output.dtype, device=partial_output.device).contiguous()
-        dist.reduce_scatter(output, output_list, group=process_group)
+            output_list = [
+                item.contiguous() for item in torch.chunk(partial_output, dist.get_world_size(process_group), dim=dim)
+            ]
+            output = torch.empty(output_shape, dtype=partial_output.dtype, device=partial_output.device).contiguous()
+            dist.reduce_scatter(output, output_list, group=process_group)
 
         return output
 
