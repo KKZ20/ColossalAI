@@ -259,6 +259,41 @@ class _GatherForwardReduceScatterBackward(torch.autograd.Function):
         return output, None, None
 
 
+class _GatherForwardReduceScatterBackward(torch.autograd.Function):
+    """Gather input from sequence parallel in forward and reduce-scatter gradient in backward
+
+    Args:
+        input_ (`torch.Tensor`): The input tensor from sequence parallel region.
+        process_group (`torch.distributed.ProcessGroup`): The process group used for collective communication.
+        overlap (`bool`): Whther to overlap the all_gather op and gradient calculate in backward.
+
+    """
+
+    @staticmethod
+    def forward(ctx, input_, process_group, dim):
+        ctx.process_group = process_group
+        ctx.dim = dim
+
+        return _gather(input_, dim, process_group)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        dim = ctx.dim
+        process_group = ctx.process_group 
+
+        # do reduce-scatter
+        new_shape = list(grad_output.shape)
+        assert (
+            new_shape[dim] % dist.get_world_size(process_group) == 0
+        ), f"The dimension to split ({new_shape[dim]}) is not a multiple of tensor parallel size ({dist.get_world_size(process_group)}). "
+        new_shape[dim] = new_shape[dim] // dist.get_world_size(process_group)
+        grad_list = [item.contiguous() for item in torch.chunk(grad_output, dist.get_world_size(process_group), dim=dim)]
+        output = torch.empty(new_shape, dtype=grad_output.dtype, device=grad_output.device)
+        dist.reduce_scatter(output, grad_list, group=process_group)
+
+        return output, None, None
+
+
 class _LinearWithGatherForwardReduceScatterBackward(torch.autograd.Function):
     """Gather input from sequence parallel in forward and reduce-scatter gradient in backward
 

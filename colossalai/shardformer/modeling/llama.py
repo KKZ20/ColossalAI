@@ -24,6 +24,8 @@ from colossalai.shardformer.layer._operation import (
     gather_forward_split_backward,
     reducescatter_forward_gather_backward,
     split_forward_gather_backward,
+    gather_forward_reducescatter_backward,
+    reducescatter_forward_gather_backward,
 )
 from colossalai.shardformer.shard import ShardConfig
 
@@ -433,7 +435,6 @@ class LlamaPipelineForwards:
             hidden_states = transformer_outputs.get("hidden_states")
             return {"hidden_states": hidden_states}
 
-
 def get_llama_flash_attention_forward(shard_config):
     from transformers.models.llama.modeling_llama import LlamaAttention, apply_rotary_pos_emb
 
@@ -498,7 +499,7 @@ def get_llama_flash_attention_forward(shard_config):
         if llama_version == 2:
             key_states = repeat_kv(key_states, self.num_key_value_groups)
             value_states = repeat_kv(value_states, self.num_key_value_groups)
-
+                
         me_input_shape = (bsz, q_len, self.num_heads, self.head_dim)
         query_states = query_states.transpose(1, 2).contiguous().view(*me_input_shape)
         key_states = key_states.transpose(1, 2).contiguous().view(*me_input_shape)
@@ -519,8 +520,8 @@ def get_llama_flash_attention_forward(shard_config):
                     )
                 flash_attention_mask = ~(attention_mask[:, :, -1].squeeze(1).to(torch.bool)).contiguous()
             attn_mask_type = AttnMaskType.paddedcausal
-        hidden_size = self.hidden_size // sp_size if sp_mode == "3" else self.hidden_size
-
+        hidden_size = self.hidden_size // sp_size if sp_mode == '3' else self.hidden_size
+        
         attention = ColoAttention(embed_dim=hidden_size, num_heads=self.num_heads)
         attn_output = attention(
             query_states, key_states, value_states, attn_mask=flash_attention_mask, attn_mask_type=attn_mask_type
@@ -780,6 +781,7 @@ def get_llama_seq_parallel_model_forward(sp_mode, sp_size, sp_group):
 
         return combined_attention_mask
 
+
     def forward(
         self,
         input_ids: torch.LongTensor = None,
@@ -906,6 +908,7 @@ def get_llama_seq_parallel_model_forward(sp_mode, sp_size, sp_group):
                     position_ids,
                 )
             else:
+                
                 layer_outputs = decoder_layer(
                     hidden_states,
                     attention_mask=attention_mask,
