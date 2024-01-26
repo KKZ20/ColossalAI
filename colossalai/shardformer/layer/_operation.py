@@ -270,7 +270,7 @@ class _LinearWithGatherForwardReduceScatterBackward(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, input_, weight, bias, process_group, async_grad_reduce_scatter, dim, overlap=True):
+    def forward(ctx, input_, weight, bias, process_group, async_grad_reduce_scatter, dim, overlap=True, ring=False):
         ctx.save_for_backward(input_, weight, bias)
         ctx.use_bias = bias is not None
         ctx.process_group = process_group
@@ -278,15 +278,11 @@ class _LinearWithGatherForwardReduceScatterBackward(torch.autograd.Function):
         ctx.dim = dim
         ctx.overlap = overlap
 
-        ring = True
         if ring is True:
             input_to_gather = {}
             input_local = {}
             input_to_gather['input'] = input_
             input_local['weight'] = weight
-
-            if bias is not None:
-                input_local['bias'] = bias
 
             output = _ring_as_gather(
                 F.linear, 
@@ -294,6 +290,9 @@ class _LinearWithGatherForwardReduceScatterBackward(torch.autograd.Function):
                 input_local=input_local, 
                 process_group=process_group,
             )
+
+            if bias is not None:
+                output += bias
         else:
             input_parallel = _gather(input_, dim, process_group)
             if bias is not None:
@@ -403,7 +402,7 @@ class _LinearWithGatherForwardReduceScatterBackward(torch.autograd.Function):
             # wait until reduce-scatter finished
             reducescatter_handle.wait()
 
-        return output, grad_weight, grad_bias, None, None, None, None
+        return output, grad_weight, grad_bias, None, None, None, None, None
 
 
 def _ring_as_reducescatter(func, input_to_reducescatter=None, input_local=None, process_group=None, reducescatter_dim=1):
@@ -470,13 +469,11 @@ class _LinearWithReduceScatterForwardGatherBackward(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, input_, weight, bias, process_group, dim):
+    def forward(ctx, input_, weight, bias, process_group, dim, ring):
         ctx.save_for_backward(input_, weight, bias)
         ctx.use_bias = bias is not None
         ctx.process_group = process_group
         ctx.dim = dim
-
-        ring = True
 
         if ring is True:
             input_to_reducescatter = {}
@@ -537,7 +534,7 @@ class _LinearWithReduceScatterForwardGatherBackward(torch.autograd.Function):
         grad_weight = grad_output.t().matmul(total_input)
         grad_bias = grad_output.sum(dim=0) if use_bias else None
 
-        return grad_input, grad_weight, grad_bias, None, None
+        return grad_input, grad_weight, grad_bias, None, None, None
 
 
 class _ReduceScatterForwardGatherBackward(torch.autograd.Function):
@@ -586,7 +583,7 @@ class _MatmulWithGatherForwardReduceScatterBackward(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, input_, weight, bias, process_group, async_grad_reduce_scatter, dim, overlap):
+    def forward(ctx, input_, weight, bias, process_group, async_grad_reduce_scatter, dim, overlap, ring):
         ctx.save_for_backward(input_, weight, bias)
         ctx.use_bias = bias is not None
         ctx.process_group = process_group
@@ -594,9 +591,24 @@ class _MatmulWithGatherForwardReduceScatterBackward(torch.autograd.Function):
         ctx.dim = dim
         ctx.overlap = overlap
 
-        input_parallel = _gather(input_, dim, process_group)
+        if ring is True:
+            input_to_gather = {}
+            input_local = {}
+            input_to_gather['input'] = input_
+            input_local['other'] = weight
 
-        output = torch.matmul(input_parallel, weight)
+            output = _ring_as_gather(
+                torch.matmul, 
+                input_to_gather=input_to_gather, 
+                input_local=input_local, 
+                process_group=process_group,
+                gather_dim=dim
+            )
+
+        else:
+            input_parallel = _gather(input_, dim, process_group)
+
+            output = torch.matmul(input_parallel, weight)
 
         if bias is not None:
             output = output + bias
@@ -677,7 +689,7 @@ class _MatmulWithGatherForwardReduceScatterBackward(torch.autograd.Function):
             # wait until reduce-scatter finished
             reducescatter_handle.wait()
 
-        return output, grad_weight, grad_bias, None, None, None, None
+        return output, grad_weight, grad_bias, None, None, None, None, None
 
 
 class _SplitForwardGatherBackward(torch.autograd.Function):
@@ -930,10 +942,10 @@ def linear_with_async_comm(input_, weight, bias, process_group, async_grad_allre
 
 
 def linear_gather_forward_reducescatter_backward(
-    input_, weight, bias, process_group, async_grad_reduce_scatter, dim, overlap
+    input_, weight, bias, process_group, async_grad_reduce_scatter, dim, overlap, ring=False
 ):
     return _LinearWithGatherForwardReduceScatterBackward.apply(
-        input_, weight, bias, process_group, async_grad_reduce_scatter, dim, overlap
+        input_, weight, bias, process_group, async_grad_reduce_scatter, dim, overlap, ring
     )
 
 
@@ -945,15 +957,15 @@ def reducescatter_forward_gather_backward(input_, process_group, dim):
     return _ReduceScatterForwardGatherBackward.apply(input_, process_group, dim)
 
 
-def linear_reducescatter_forward_gather_backward(input_, weight, bias=None, process_group=None, dim=1):
-    return _LinearWithReduceScatterForwardGatherBackward.apply(input_, weight, bias, process_group, dim)
+def linear_reducescatter_forward_gather_backward(input_, weight, bias=None, process_group=None, dim=1, ring=False):
+    return _LinearWithReduceScatterForwardGatherBackward.apply(input_, weight, bias, process_group, dim, ring)
 
 
 def matmul_gather_forward_reducescatter_backward(
-    input_, weight, bias, process_group, async_grad_reduce_scatter, dim, overlap
+    input_, weight, bias, process_group, async_grad_reduce_scatter, dim, overlap, ring=False
 ):
     return _MatmulWithGatherForwardReduceScatterBackward.apply(
-        input_, weight, bias, process_group, async_grad_reduce_scatter, dim, overlap
+        input_, weight, bias, process_group, async_grad_reduce_scatter, dim, overlap, ring
     )
 
 
